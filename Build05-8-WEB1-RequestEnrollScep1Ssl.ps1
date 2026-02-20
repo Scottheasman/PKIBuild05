@@ -11,8 +11,8 @@
     - web1.lab.local   (WEB1 only)
 
 .EXAMPLE
-    .\cert1.ps1 -TargetCA CA1
-    .\cert1.ps1 -TargetCA CA1 -RetrieveOnly -RequestId 15 -BindToIIS -Validate
+    .\Build05-8-WEB1-RequestEnrollScep1Ssl -TargetCA CA1
+    .\Build05-8-WEB1-RequestEnrollScep1Ssl -TargetCA CA1 -RetrieveOnly -RequestId 15 -BindToIIS -Validate
 #>
 
 [CmdletBinding()]
@@ -28,17 +28,12 @@ param(
     [switch]$ForceOverwrite
 )
 
-# --- Logging: ensure folder and start transcript ---
-$LogDir = "C:\Scripts"
-if (!(Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory -Force | Out-Null }
-Start-Transcript -Path (Join-Path $LogDir "PKILab-8c-WEB1-RequestEnrollScepSsl.log") -Append -ErrorAction SilentlyContinue
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ====
+# ============================================================
 # WEB1 Configuration
-# ====
+# ============================================================
 $HostShort  = "WEB1"
 $HostFqdn   = "web1.lab.local"
 $EnrollFqdn = "enroll.lab.local"
@@ -62,8 +57,9 @@ $ReqPath  = Join-Path $WorkRoot "$HostShort-EnrollScepSsl.req"
 $CerPath  = Join-Path $WorkRoot "$HostShort-EnrollScepSsl.cer"
 $LastId   = Join-Path $WorkRoot "LastRequestId.txt"
 
-# ==== helper functions and main flow remain unchanged ====
-
+# ============================================================
+# Helper Functions
+# ============================================================
 function Write-Info($m)  { Write-Host "[INFO]  $m" -ForegroundColor Cyan }
 function Write-Ok($m)    { Write-Host "[OK]    $m" -ForegroundColor Green }
 function Write-Warn($m)  { Write-Host "[WARN]  $m" -ForegroundColor Yellow }
@@ -106,7 +102,7 @@ function Get-RemoteTlsCertificateInfoByIp {
             if ($sanExt) {
                 $asn = New-Object System.Security.Cryptography.AsnEncodedData($sanExt.Oid, $sanExt.RawData)
                 $dnsNames = @(([regex]::Matches($asn.Format($false), 'DNS Name=([^\s,]+)') | 
-                    ForEach-Object { $_.Groups[1].Value.Trim() }))
+                              ForEach-Object { $_.Groups[1].Value.Trim() }))
             }
         } catch { }
         
@@ -148,8 +144,8 @@ CertificateTemplate = __TEMPLATE__
 _continue_ = "__SAN__"
 '@
     $inf = $infTemplate.Replace("__SUBJECT__", $HostFqdn).
-                    Replace("__TEMPLATE__", $Template).
-                    Replace("__SAN__", $sanJoined)
+                        Replace("__TEMPLATE__", $Template).
+                        Replace("__SAN__", $sanJoined)
     
     $inf | Out-File -FilePath $infPath -Encoding ascii -Force
     Write-Ok "INF file written: $infPath"
@@ -273,20 +269,68 @@ function Validate-Tls {
     & netsh http show sslcert ipport=0.0.0.0:443 | Out-Host
 }
 
-# ==== main execution continues unchanged ====
+# ============================================================
+# Main Execution
+# ============================================================
 
-Write-Host "`n====" -ForegroundColor Cyan
+Write-Host "`n============================================================" -ForegroundColor Cyan
 Write-Host "  PKI Lab - $HostShort Certificate Enrollment" -ForegroundColor Cyan
-Write-Host "====" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "Host:       $HostFqdn" -ForegroundColor Gray
 Write-Host "CA:         $CAConfig" -ForegroundColor Gray
 Write-Host "Template:   $Template" -ForegroundColor Gray
 Write-Host "SANs:       $($SANs -join ', ')" -ForegroundColor Gray
-Write-Host "====`n" -ForegroundColor Cyan
+Write-Host "============================================================`n" -ForegroundColor Cyan
 
 Ensure-Dir $WorkRoot
 
-# ==== Phase 1 and 2 logic unchanged ====
+# ============================================================
+# Phase 1: Request & Submit
+# ============================================================
+if (-not $RetrieveOnly) {
+    Write-Step "Phase 1: Generate CSR and Submit to CA"
+    
+    Write-InfFile
+    Invoke-CertreqNew
+    $id = Invoke-CertreqSubmit
+    
+    Write-Host "`n============================================================" -ForegroundColor Yellow
+    Write-Host "  NEXT STEP: Retrieve, Install, Bind & Validate" -ForegroundColor Yellow
+    Write-Host "============================================================" -ForegroundColor Yellow
+    Write-Host "Run the following command:`n" -ForegroundColor White
+    Write-Host "  .\Build05-8-WEB1-RequestEnrollScep1Ssl -TargetCA $TargetCA -RetrieveOnly -RequestId $id -BindToIIS -Validate`n" -ForegroundColor Green
+    Write-Host "============================================================`n" -ForegroundColor Yellow
+    
+    exit 0
+}
 
-# --- Stop logging/transcript ---
-Stop-Transcript -ErrorAction SilentlyContinue
+# ============================================================
+# Phase 2: Retrieve, Install, Bind & Validate
+# ============================================================
+if ($RetrieveOnly) {
+    if (-not $RequestId -and (Test-Path $LastId)) { 
+        $RequestId = [int](Get-Content $LastId) 
+        Write-Info "Using RequestId from last run: $RequestId"
+    }
+    
+    if (-not $RequestId) { 
+        throw "RetrieveOnly mode requires -RequestId parameter or $LastId file" 
+    }
+    
+    Write-Step "Phase 2: Retrieve & Install Certificate"
+    $thumb = Invoke-CertreqRetrieveAccept -Id $RequestId
+    
+    if ($BindToIIS) {
+        Write-Step "Phase 3: Bind Certificate to IIS & HTTP.SYS"
+        Ensure-IISBindingAndBindHttpSys -Thumbprint $thumb
+    }
+    
+    if ($Validate) {
+        Write-Step "Phase 4: Validate TLS Configuration"
+        Validate-Tls
+    }
+    
+    Write-Host "`n============================================================" -ForegroundColor Green
+    Write-Host "  Certificate Enrollment Complete ✓" -ForegroundColor Green
+    Write-Host "============================================================`n" -ForegroundColor Green
+}
