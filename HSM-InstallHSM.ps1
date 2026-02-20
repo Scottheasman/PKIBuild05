@@ -14,13 +14,11 @@ if (!(Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory -Force | 
 Start-Transcript -Path (Join-Path $LogDir "PKILab-5-RootCA-install.log") -Append -ErrorAction SilentlyContinue
 
 ### 1 - Common Variables
-$DomainFqdn      = "lab.local"
-$PkiHttpHost     = "pki.lab.local"
-$RootCAName      = "Lab Root CA"
-
-# Derived
-$PkiHttpBase     = "http://$PkiHttpHost/pkidata"
-$CertEnrollDir   = "C:\Windows\System32\CertSrv\CertEnroll"
+$DomainFqdn    = "lab.local"
+$PkiHttpHost   = "pki.lab.local"
+$RootCAName    = "Lab Root CA"
+$PkiHttpBase   = "http://$PkiHttpHost/pkidata"
+$CertEnrollDir = "C:\Windows\System32\CertSrv\CertEnroll"
 
 ### 2 - Pre-flight: Verify YubiHSM KSP is registered
 Write-Host "Verifying YubiHSM Key Storage Provider is registered..." -ForegroundColor Cyan
@@ -62,19 +60,20 @@ Write-Host "CAPolicy.inf created successfully." -ForegroundColor Green
 Write-Host "Installing ADCS-Cert-Authority feature..." -ForegroundColor Cyan
 Install-WindowsFeature ADCS-Cert-Authority -IncludeManagementTools
 
-Write-Host "Configuring Standalone Root CA using YubiHSM KSP..." -ForegroundColor Cyan
+Write-Host "Configuring Standalone Root CA using existing YubiHSM key..." -ForegroundColor Cyan
 $vCaRootProperties = @{
-    CACommonName                = $RootCAName
-    CADistinguishedNameSuffix   = "O=Lab,L=Lauderdale,S=Florida,C=US"
-    CAType                      = 'StandaloneRootCA'
-    CryptoProviderName          = 'YubiHSM Key Storage Provider'   # YUBIHSM CHANGE
-    HashAlgorithmName           = 'SHA256'
-    KeyLength                   = 4096
-    ValidityPeriod              = 'Years'
-    ValidityPeriodUnits         = 20
-    ExistingKeyContainerName    = 'IEX-RootCA-Key-v1'              # YUBIHSM CHANGE: bind to pre-created HSM key
+    CACommonName              = $RootCAName
+    CADistinguishedNameSuffix = "O=Lab,L=Lauderdale,S=Florida,C=US"
+    CAType                    = 'StandaloneRootCA'
+    CryptoProviderName        = 'YubiHSM Key Storage Provider'   # YUBIHSM CHANGE
+    HashAlgorithmName         = 'SHA256'
+    ValidityPeriod            = 'Years'
+    ValidityPeriodUnits       = 20
+    KeyContainerName          = 'IEX-RootCA-Key-v1'              # FIXED: was ExistingKeyContainerName
+    Force                     = $true                            # FIXED: moved into splatting table
 }
-Install-AdcsCertificationAuthority @vCaRootProperties -Force
+# NOTE: KeyLength is intentionally omitted - key already exists on the HSM
+Install-AdcsCertificationAuthority @vCaRootProperties
 Write-Host "Root CA installed and configured." -ForegroundColor Green
 
 ### 5 - Configure Validity and CRL Settings
@@ -103,7 +102,9 @@ Add-CACrlDistributionPoint -Uri "$PkiHttpBase/%3%8.crl" -AddToCertificateCdp -Ad
 
 # ---- AIA (Authority Information Access) ----
 Write-Host "  Setting AIA locations..." -ForegroundColor Gray
-Get-CAAuthorityInformationAccess | Where-Object { $_.Uri -like '*ldap*' -or $_.Uri -like '*http*' -or $_.Uri -like '*file*' -or $_.Uri -like '\\' } | Remove-CAAuthorityInformationAccess -Force
+Get-CAAuthorityInformationAccess |
+    Where-Object { $_.Uri -like '*ldap*' -or $_.Uri -like '*http*' -or $_.Uri -like '*file*' -or $_.Uri -like '\\' } |
+    Remove-CAAuthorityInformationAccess -Force
 certutil -setreg CA\CACertPublicationURLs "1:$CertEnrollDir\%3%4.crt"
 Add-CAAuthorityInformationAccess -Uri "$PkiHttpBase/%3%4.crt" -AddToCertificateAia -Force
 
