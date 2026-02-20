@@ -1,0 +1,118 @@
+## 6 - Install SubCA2 (Lab Issuing CA 2) - PART 1 (YubiHSM 2 Edition)
+
+### RUN THIS ENTIRE SCRIPT ON SUBCA2 SERVER (elevated PowerShell)
+### PRE-REQUISITE: YubiHSM Connector, CNG Provider, and Shell must be installed on this server.
+### PRE-REQUISITE: YubiHSM stick for SubCA2 must be inserted and connector service running.
+
+# --- Logging: ensure folder and start transcript ---
+$LogDir = "C:\Scripts"
+if (!(Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory -Force | Out-Null }
+Start-Transcript -Path (Join-Path $LogDir "PKILab-6-Subca2-install-Part1.log") -Append -ErrorAction SilentlyContinue
+
+### 1 - Common PKI Settings
+$PkiHttpHost    = "pki.lab.local"
+$PkiHttpBase    = "http://$PkiHttpHost/pkidata"
+$DfsPkiPath     = "\\lab.local\share\PKIData"
+$CertEnrollDir  = "C:\Windows\System32\CertSrv\CertEnroll"
+$LocalPkiFolder = "C:\PKIData"
+
+# This CA's name
+$SubCAName = "Lab Issuing CA 2"
+
+Write-Host "Creating local PKI folder..." -ForegroundColor Cyan
+New-Item -Path $LocalPkiFolder -ItemType Directory -Force | Out-Null
+
+### 2 - Pre-flight: Verify YubiHSM KSP is registered
+Write-Host "Verifying YubiHSM Key Storage Provider is registered..." -ForegroundColor Cyan
+$cspList = certutil -csplist
+if ($cspList -match "YubiHSM Key Storage Provider") {
+    Write-Host "YubiHSM Key Storage Provider found. Proceeding." -ForegroundColor Green
+} else {
+    Write-Host "ERROR: YubiHSM Key Storage Provider NOT found in certutil -csplist." -ForegroundColor Red
+    Write-Host "Ensure the YubiHSM Connector service is running and the CNG Provider is installed." -ForegroundColor Yellow
+    Stop-Transcript -ErrorAction SilentlyContinue
+    exit 1
+}
+
+### 3 - Create CAPolicy.inf
+Write-Host "Creating CAPolicy.inf..." -ForegroundColor Cyan
+$CaPolicyContent = @"
+[Version]
+Signature="`$Windows NT`$"
+
+[PolicyStatementExtension]
+Policies=InternalPolicy
+[InternalPolicy]
+OID=1.2.3.4.1455.67.89.5
+Notice="Legal Policy Statement"
+URL=$PkiHttpBase/cps.html
+
+[Certsrv_Server]
+RenewalKeyLength=3072
+RenewalValidityPeriod=Years
+RenewalValidityPeriodUnits=5
+LoadDefaultTemplates=0
+AlternateSignatureAlgorithm=0
+"@
+
+Set-Content -Path C:\Windows\CAPolicy.inf -Value $CaPolicyContent -Force
+Write-Host "CAPolicy.inf created successfully." -ForegroundColor Green
+
+### 4 - Install AD CS Role & Generate Request
+Write-Host "Installing ADCS-Cert-Authority feature..." -ForegroundColor Cyan
+Install-WindowsFeature ADCS-Cert-Authority -IncludeManagementTools
+
+Write-Host "Configuring Enterprise Subordinate CA and generating request via YubiHSM..." -ForegroundColor Cyan
+$vCaIssProperties = @{
+    CACommonName              = $SubCAName
+    CADistinguishedNameSuffix = 'O=Lab,L=Fort Lauderdale,S=Florida,C=US'
+    CAType                    = 'EnterpriseSubordinateCA'
+    CryptoProviderName        = 'YubiHSM Key Storage Provider'   # YUBIHSM CHANGE
+    HashAlgorithmName         = 'SHA256'
+    KeyLength                 = 3072                              # YUBIHSM CHANGE: RSA 3072 for SubCA performance
+    OutputCertRequestFile     = "$LocalPkiFolder\subca2_request.req"
+}
+Install-AdcsCertificationAuthority @vCaIssProperties -Force
+Write-Host "SubCA2 role installed and request generated on YubiHSM." -ForegroundColor Green
+
+### 5 - Manual Steps for Offline Root CA Processing
+Write-Host ""
+Write-Host "====" -ForegroundColor Red
+Write-Host "*** MANUAL STEPS REQUIRED ***" -ForegroundColor Red
+Write-Host "SubCA2 certificate request has been generated. The following manual steps are CRITICAL:" -ForegroundColor Yellow
+Write-Host "====" -ForegroundColor Red
+Write-Host ""
+Write-Host "1. MANUALLY COPY REQUEST FILE FROM SUBCA2:" -ForegroundColor Cyan
+Write-Host "   Source: $LocalPkiFolder\subca2_request.req" -ForegroundColor Gray
+Write-Host "   Action: Copy this file to a removable media (e.g., USB drive)." -ForegroundColor Gray
+Write-Host ""
+Write-Host "2. PROCESS REQUEST ON OFFLINE ROOT CA:" -ForegroundColor Cyan
+Write-Host "   Action: Take the media to the Offline Root CA server." -ForegroundColor Gray
+Write-Host "   Destination: $CertEnrollDir\" -ForegroundColor Yellow
+Write-Host "   Action: Paste the subca2_request.req file into the folder above." -ForegroundColor Gray
+Write-Host ""
+Write-Host "   Commands to run on Root CA (Elevated PowerShell):" -ForegroundColor Gray
+Write-Host "   cd $CertEnrollDir" -ForegroundColor White
+Write-Host "   certreq -submit subca2_request.req subca2_issued.cer" -ForegroundColor White
+Write-Host ""
+Write-Host "   # Note: Select 'Lab Root CA' if prompted. If the request goes to 'Pending':" -ForegroundColor Gray
+Write-Host "   certutil -resubmit <RequestID>" -ForegroundColor White
+Write-Host "   certreq -retrieve <RequestID> subca2_issued.cer" -ForegroundColor White
+Write-Host ""
+Write-Host "3. MANUALLY COPY ISSUED CERTIFICATE BACK TO SUBCA2:" -ForegroundColor Cyan
+Write-Host "   Source on Root CA: $CertEnrollDir\subca2_issued.cer" -ForegroundColor Gray
+Write-Host "   Destination on SubCA2: $LocalPkiFolder\subca2_issued.cer" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "4. COMPLETE SUBCA2 CONFIGURATION:" -ForegroundColor Cyan
+Write-Host "   Action: Once the file is back on SubCA2, run the Part 2 script." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "====" -ForegroundColor Red
+Write-Host "DO NOT PROCEED UNTIL subca2_issued.cer IS IN $LocalPkiFolder" -ForegroundColor Red
+Write-Host "====" -ForegroundColor Red
+Write-Host ""
+
+# Open folder for easy access to request file
+explorer.exe $LocalPkiFolder
+
+# --- Stop logging/transcript ---
+Stop-Transcript -ErrorAction SilentlyContinue
